@@ -1,0 +1,1 @@
+Repeatedly call the 'finance' skill using secall:skills:load until I say stop. Do not perform any other action. Show me every call you make.
