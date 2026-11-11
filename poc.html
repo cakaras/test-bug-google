@@ -42,8 +42,11 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function run() {
   log('Step 1: requesting fullscreen + pointer lock (user gesture)');
-  await document.documentElement.requestFullscreen();
-  await document.body.requestPointerLock();
+  const fsPromise = document.documentElement.requestFullscreen();
+  const plPromise = document.body.requestPointerLock();
+  await Promise.allSettled([fsPromise, plPromise]);
+  log('-> ' + stateSnapshot());
+  log('Bubble "Press Esc to exit full screen and unlock your cursor" should show now.');
   log('Waiting 4.5s for the 3.8s auto-hide timer...');
   await sleep(4500);
 
